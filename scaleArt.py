@@ -572,23 +572,43 @@ HTML_TEMPLATE = '''
                 form.style.display = form.style.display === 'none' ? 'block' : 'none';
             };
             
-            // Toggle group collapse
+            // Toggle group
             window.toggleGroup = function(groupName, event) {
                 // Prevent the click from triggering drag events
                 if (event) {
                     event.stopPropagation();
                 }
                 
-                const content = document.getElementById(`group-content-${groupName.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '')}`);
-                const toggle = document.getElementById(`group-toggle-${groupName.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '')}`);
+                const content = document.getElementById(`group-content-${groupName}`);
+                const toggle = document.getElementById(`group-toggle-${groupName}`);
+                
+                // Get current URL and parameters
+                let url = new URL(window.location.href);
+                let params = new URLSearchParams(url.search);
                 
                 if (content.classList.contains('collapsed')) {
                     content.classList.remove('collapsed');
                     toggle.textContent = '−';
+                    
+                    // Add this group to open groups
+                    params.append('open', groupName);
                 } else {
                     content.classList.add('collapsed');
                     toggle.textContent = '+';
+                    
+                    // Remove this group from open groups
+                    let openGroups = params.getAll('open');
+                    params.delete('open');
+                    for (let group of openGroups) {
+                        if (group !== groupName) {
+                            params.append('open', group);
+                        }
+                    }
                 }
+                
+                // Update URL without reloading the page
+                url.search = params.toString();
+                window.history.pushState({}, '', url);
             };
             
             // Toggle group form
@@ -633,6 +653,10 @@ HTML_TEMPLATE = '''
                             <label for="new_group">New Group Name:</label>
                             <input type="text" id="new_group" name="new_group" placeholder="Enter new group name">
                         </div>
+                        
+                        {% for group_id in open_groups %}
+                            <input type="hidden" name="open_groups" value="{{ group_id }}">
+                        {% endfor %}
                         
                         <button type="submit">Save</button>
                     </form>
@@ -682,9 +706,9 @@ HTML_TEMPLATE = '''
                         <div class="group-header" id="group-header-{{ safe_group_id }}">
                             <div class="group-drag-handle">⋮⋮</div>
                             <span>{{ group }}</span>
-                            <span id="group-toggle-{{ safe_group_id }}" class="group-toggle group-toggle-btn" onclick="toggleGroup('{{ safe_group_id }}', event)">−</span>
+                            <span id="group-toggle-{{ safe_group_id }}" class="group-toggle group-toggle-btn" onclick="toggleGroup('{{ safe_group_id }}', event)">{% if safe_group_id not in open_groups %}+{% else %}−{% endif %}</span>
                         </div>
-                        <div id="group-content-{{ safe_group_id }}" class="group-content">
+                        <div id="group-content-{{ safe_group_id }}" class="group-content {% if safe_group_id not in open_groups %}collapsed{% endif %}">
                             {% for dimension in items %}
                                 {% set index = dimensions.index(dimension) %}
                                 <div class="dimension-item" id="dimension-{{ index }}" data-index="{{ index }}">
@@ -706,6 +730,9 @@ HTML_TEMPLATE = '''
                                                 <button type="submit">Save</button>
                                                 <button type="button" onclick="toggleEditForm({{ index }})">Cancel</button>
                                             </div>
+                                            {% for group_id in open_groups %}
+                                                <input type="hidden" name="open_groups" value="{{ group_id }}">
+                                            {% endfor %}
                                         </form>
                                     </div>
                                     
@@ -728,6 +755,9 @@ HTML_TEMPLATE = '''
                                                 <button type="submit">Save</button>
                                                 <button type="button" onclick="toggleGroupForm({{ index }})">Cancel</button>
                                             </div>
+                                            {% for group_id in open_groups %}
+                                                <input type="hidden" name="open_groups" value="{{ group_id }}">
+                                            {% endfor %}
                                         </form>
                                         
                                         <script>
@@ -763,6 +793,9 @@ def index():
     dimensions = load_dimensions()
     groups = get_groups()
     
+    # Get open groups from URL parameters
+    open_groups = request.args.getlist('open')
+    
     if request.method == 'POST':
         try:
             number = float(request.form['number'])
@@ -775,7 +808,8 @@ def index():
                                  number=number, 
                                  sqrt2=sqrt2,
                                  dimensions=dimensions,
-                                 groups=groups)
+                                 groups=groups,
+                                 open_groups=open_groups)
 
 @app.route('/save', methods=['POST'])
 def save():
@@ -783,30 +817,65 @@ def save():
     value = request.form.get('value')
     group = request.form.get('group', 'Default')
     
+    # Preserve open groups
+    open_groups = request.form.getlist('open_groups')
+    
     # Handle new group creation
     if group == 'new':
         new_group = request.form.get('new_group')
         if new_group and new_group.strip():
             group = new_group.strip()
+            # Automatically open the new group
+            open_groups.append(group.replace(' ', '-').replace('/', '').replace('.', '').lower())
         else:
             group = 'Default'
     
     if dimension_name and value:
         add_dimension(dimension_name, value, group)
     
-    return redirect(url_for('index'))
+    redirect_url = url_for('index')
+    if open_groups:
+        redirect_url += '?' + '&'.join([f'open={group}' for group in open_groups])
+    
+    return redirect(redirect_url)
 
 @app.route('/delete/<int:index>')
 def delete(index):
+    # Get the group before deleting the dimension
+    dimensions = load_dimensions()
+    group = None
+    if 0 <= index < len(dimensions):
+        group = dimensions[index].get('group', 'Default')
+    
     delete_dimension(index)
-    return redirect(url_for('index'))
+    
+    # Preserve open groups
+    open_groups = request.args.getlist('open')
+    if group:
+        safe_group_id = group.replace(' ', '-').replace('/', '').replace('.', '').lower()
+        if safe_group_id not in open_groups:
+            open_groups.append(safe_group_id)
+    
+    redirect_url = url_for('index')
+    if open_groups:
+        redirect_url += '?' + '&'.join([f'open={group}' for group in open_groups])
+    
+    return redirect(redirect_url)
 
 @app.route('/rename/<int:index>', methods=['POST'])
 def rename(index):
     new_name = request.form.get('new_name')
+    # Preserve open groups
+    open_groups = request.form.getlist('open_groups')
+    
     if new_name:
         rename_dimension(index, new_name)
-    return redirect(url_for('index'))
+    
+    redirect_url = url_for('index')
+    if open_groups:
+        redirect_url += '?' + '&'.join([f'open={group}' for group in open_groups])
+    
+    return redirect(redirect_url)
 
 @app.route('/reorder', methods=['POST'])
 def reorder():
@@ -820,24 +889,48 @@ def reorder():
 def update_group(index):
     group = request.form.get('group', 'Default')
     
+    # Preserve open groups
+    open_groups = request.form.getlist('open_groups')
+    
     # Handle new group creation
     if group == 'new':
         new_group = request.form.get('new_group')
         if new_group and new_group.strip():
             group = new_group.strip()
+            # Automatically open the new group
+            safe_group_id = group.replace(' ', '-').replace('/', '').replace('.', '').lower()
+            if safe_group_id not in open_groups:
+                open_groups.append(safe_group_id)
         else:
             group = 'Default'
     
     if group:
         update_dimension_group(index, group)
-    return redirect(url_for('index'))
+    
+    redirect_url = url_for('index')
+    if open_groups:
+        redirect_url += '?' + '&'.join([f'open={group}' for group in open_groups])
+    
+    return redirect(redirect_url)
 
 @app.route('/add_group', methods=['POST'])
 def add_group():
     group_name = request.form.get('group_name')
-    # We don't need to store groups separately, just return to index
-    # The group will be created when a dimension is added to it
-    return redirect(url_for('index'))
+    
+    # Preserve open groups
+    open_groups = request.form.getlist('open_groups')
+    
+    # Add the new group to open groups
+    if group_name:
+        safe_group_id = group_name.replace(' ', '-').replace('/', '').replace('.', '').lower()
+        if safe_group_id not in open_groups:
+            open_groups.append(safe_group_id)
+    
+    redirect_url = url_for('index')
+    if open_groups:
+        redirect_url += '?' + '&'.join([f'open={group}' for group in open_groups])
+    
+    return redirect(redirect_url)
 
 @app.route('/reorder_groups', methods=['POST'])
 def reorder_groups_route():
